@@ -65,18 +65,30 @@
     }
   }
   // ---------- salvataggio ----------
+  // Si salva sul PC; sync.js lo manda a RankWit. Se il server non risponde, accanto
+  // all'ora compare «in attesa di rete»: le risposte partono quando torna.
+  const SY = window.Sync && window.Sync.enabled ? window.Sync : null;
+  let lastSave = null;
   function setSave(state, at) {
+    lastSave = { state, at: at || new Date() };
     const el = $('#save');
     if (!el) return;
     el.classList.toggle('is-saving', state === 'saving');
     el.classList.toggle('is-error', state === 'error');
     const t = $('.save-text', el);
-    t.textContent = state === 'saving' ? 'Salvo…' : state === 'error' ? 'Questo browser non salva: alla fine scarica il documento' : 'Salvato alle ' + fmtTime(at || new Date());
+    const net = SY && SY.state().failing ? ', in attesa di rete' : '';
+    t.textContent = state === 'saving' ? 'Salvo…' : state === 'error' ? 'Questo browser non salva: alla fine scarica il documento' : 'Salvato alle ' + fmtTime(at || new Date()) + net;
   }
   S.onChange(e => { if (e.type === 'saved') setSave(e.ok ? 'saved' : 'error', e.at); });
   // Si salva subito a ogni modifica: con due schede aperte nello stesso browser
   // un salvataggio rimandato si perderebbe quando l'altra scheda ricarica i dati.
-  function queueSave() { S.save(); }
+  // L'avanzamento si ricalcola prima, così arriva aggiornato anche al pannello.
+  function queueSave() {
+    const sess = S.session.get();
+    const p = sess && S.byId('participants', sess.participant_id);
+    if (p) S.computeProgress(p);
+    S.save();
+  }
 
   // ---------- pagine ----------
   // Ogni file HTML dichiara cosa mostra: index.html (ingresso ed elenco degli
@@ -87,7 +99,6 @@
   const codeParam = ev => (!ev || (S.configEvent() && S.configEvent().id === ev.id) ? '' : '?evento=' + encodeURIComponent(ev.code));
   const exLink = (ev, n) => 'esercizio-' + n + '.html' + codeParam(ev);
   const homeLink = ev => 'index.html' + codeParam(ev);
-  const prodLink = (ev, n) => 'lab.rankwit.ai/' + ev.code + (n ? '/' + n : '');
 
   // ---------- router ----------
   let cleanups = [];
@@ -127,7 +138,13 @@
   function currentEvent() {
     const code = (new URLSearchParams(location.search).get('evento') || '').trim().toLowerCase();
     const sess = S.session.get();
-    return { code, ev: code ? S.eventByCode(code) : (S.configEvent() || (sess ? S.byId('events', sess.event_id) : null)) };
+    const sev = sess ? S.byId('events', sess.event_id) : null;
+    // Chi ha iniziato oggi resta nel suo evento anche se nel frattempo l'evento in
+    // corso è cambiato (per esempio: alla prima pagina il server non rispondeva e
+    // valeva evento.js). Così non riscrive il nome e non perde le risposte.
+    const sp = sev && sev.status === 'aperto' ? S.byId('participants', sess.participant_id) : null;
+    if (!code && sp && sp.created_at && new Date(sp.created_at).toDateString() === new Date().toDateString()) return { code, ev: sev };
+    return { code, ev: code ? S.eventByCode(code) : (S.configEvent() || sev) };
   }
   // Se chi conduce cambia lo stato dell'evento, la pagina si aggiorna da sola.
   const openSig = ev => (ev ? ev.status : '');
@@ -210,11 +227,38 @@
   }
   const exHead = (ex, text) => `<div class="head"><span class="label">Esercizio ${ex.n} di 4</span><h1>${esc(ex.long)}</h1>${text ? `<p>${text}</p>` : ''}</div>`;
 
+  // «Invia» vale quando il server ha confermato: fino ad allora si dice che si sta
+  // inviando o che la rete non risponde (e sync.js riprova da solo).
+  let waiting = null;
+  function sendWait(p, exId) {
+    const row = S.find('submissions', r => r.participant_id === p.id && r.exercise_id === exId && r.question_id === null && r.field === 'inviato');
+    const st = SY && row && row.value ? SY.rowState('submissions', row) : 'ok';
+    waiting = st === 'ok' ? null : { pid: p.id, exId };
+    if (st === 'failing') return '<p class="alert"><strong>Non riesco a inviare: la rete non risponde.</strong> Riprovo da solo, lascia aperta la pagina.</p>';
+    if (st === 'sending') return '<p class="note">Invio in corso…</p>';
+    return '';
+  }
+  if (SY) {
+    let wasFailing = false;
+    SY.onChange(st => {
+      // L'indicatore cambia solo quando la rete cade o torna.
+      if (st.failing !== wasFailing && lastSave && lastSave.state === 'saved') setSave('saved', lastSave.at);
+      wasFailing = st.failing;
+      if (!waiting) return;
+      const w = waiting;
+      refreshStatus(w.pid, w.exId);
+      if (!waiting) toast('Inviato.');
+    });
+  }
+
   // Fine esercizio: niente link al successivo, si aspetta la sala.
   function statusHtml(p, exId) {
     S.computeProgress(p);
+    waiting = null;
     if (S.allOff(p, exId)) return '<p class="alert"><strong>Nessun motore ha risposto.</strong> Chiedi aiuto in sala, poi premi «Riprova» su una delle schede.</p>';
     if (exId === 'faq' && !p.progress.faq) return '<p class="note">Per chiudere l’esercizio incolla qui sopra il testo che ha scritto ChatGPT (passo 3).</p>';
+    const wait = exId !== 'faq' ? sendWait(p, exId) : '';
+    if (wait) return wait;
     if (STEPS.every(s => p.progress[s])) return `<p class="note info"><strong>Hai finito tutti gli esercizi.</strong> Il riepilogo è nella <a href="${homeLink(currentEvent().ev)}">pagina iniziale</a>.</p>`;
     // Esercizi con i motori: si chiudono con «Invia».
     if (exId !== 'faq') {
@@ -227,8 +271,7 @@
       : '<p class="muted small">Le risposte si salvano da sole. Quando hai finito, aspetta le indicazioni in sala.</p>';
   }
   const statusBox = (p, exId) => `<div class="ex-status section" id="ex-status" aria-live="polite">${statusHtml(p, exId)}</div>`;
-  // «Invia» per gli esercizi 2, 3 e 4. Per ora chiude l'esercizio su questo PC:
-  // l'invio a RankWit arriva con la Fase 2.
+  // «Invia» per gli esercizi 2, 3 e 4: chiude l'esercizio e manda tutto a RankWit.
   const sendBox = (p, exId) => `<div class="send-box section"><button class="btn primary" type="button" id="send">Invia</button><div class="ex-status" id="ex-status" aria-live="polite">${statusHtml(p, exId)}</div></div>`;
   function exQuestion(ev, p, exId) {
     if (exId === 'territorio') return S.territoryQuestion(ev);
@@ -262,13 +305,21 @@
       if (S.allOff(p, exId)) { refreshStatus(pid, exId); return; }
       const miss = missingFor(ev, p, exId);
       if (miss.length) {
+        waiting = null;
         $('#ex-status').innerHTML = `<div class="alert"><strong>Manca ancora:</strong><ul>${miss.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
         return;
       }
       S.setSub(p, exId, null, 'inviato', new Date().toISOString());
-      S.save();
+      queueSave();
       refreshStatus(pid, exId);
-      toast('Inviato.');
+      if (!SY) { toast('Inviato.'); return; }
+      // «Inviato» solo quando il server conferma; se la rete non risponde lo dice
+      // il riquadro qui sotto, e quando l'invio riesce arriva lo stesso avviso.
+      SY.flushNow().then(() => {
+        if (!waiting) return;
+        refreshStatus(pid, exId);
+        if (!waiting) toast('Inviato.');
+      });
     });
   }
   function refreshStatus(pid, exId) {
@@ -735,25 +786,93 @@
   // =====================================================================
   // PANNELLO RANKWIT
   // =====================================================================
+  // I dati arrivano dal server (funzioni lab_admin_* in supabase/migrations) e
+  // stanno in memoria nello Store: le viste di avanzamento, risultati ed export
+  // sono quelle del prototipo. Accesso con Supabase Auth: solo chi è invitato e
+  // scritto nella tabella lab.staff. Ruolo «team»: vede tutto e scarica i file
+  // anonimi; ruolo «dati»: scarica anche i file con nomi e comuni e cancella.
   let ui = { names: false, filter: 'tutti', tables: {}, ident: false };
+  const A = { client: null, ready: false, me: null, token: 0, meta: {}, loaded: {}, setPassword: false };
+  const POLL = 10000;
+  const isData = () => !!A.me && A.me.role === 'dati';
+  const siteBase = () => location.href.replace(/admin\.html.*$/, '').replace(/[?#].*$/, '');
+  const shortUrl = u => u.replace(/^https?:\/\//, '');
+  const partLink = ev => siteBase() + homeLink(ev);
+  const partExLink = (ev, n) => siteBase() + exLink(ev, n);
+
+  async function call(name, args) {
+    const { data, error } = await A.client.rpc(name, args || {});
+    if (error) throw new Error(error.message || 'Il server non risponde.');
+    return data;
+  }
+  const errText = e => (/fetch|network|Failed/i.test(String(e && e.message)) ? 'Il server non risponde. Controlla la connessione e riprova.' : String((e && e.message) || e));
+
+  async function adminBoot() {
+    const cfg = window.LAB_SERVER || {};
+    if (!window.supabase || !cfg.url || !cfg.key) {
+      app.innerHTML = '<main class="home"><div class="card"><h1>Pannello non configurato</h1><p class="muted" style="margin-top:8px">Manca l’indirizzo del server in server.js.</p></div></main>';
+      return;
+    }
+    // Link dell'email di invito o di nuova password: si sceglie la password.
+    A.setPassword = /type=(invite|recovery)/.test(location.hash);
+    A.client = window.supabase.createClient(cfg.url, cfg.key, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit', storageKey: 'labportale.pannello' }
+    });
+    A.client.auth.onAuthStateChange(event => {
+      if (event === 'PASSWORD_RECOVERY') A.setPassword = true;
+      if (event === 'SIGNED_OUT') A.me = null;
+    });
+    await A.client.auth.getSession();
+    A.ready = true;
+    if (A.setPassword) history.replaceState(null, '', location.pathname + '#/admin/password');
+    render();
+  }
 
   function adminRoute(parts, query) {
     document.title = 'Area RankWit · Portale del Lab';
-    if (parts[0] === 'esci') { S.admin.clear(); return go('#/admin'); }
-    if (!S.admin.get()) return viewLogin();
-    if (!parts[0] || parts[0] === 'eventi') return viewEvents();
-    if (parts[0] === 'nuovo') return viewNewEvent();
-    if (parts[0] === 'e' && S.byId('events', parts[1])) return viewEvent(S.byId('events', parts[1]), query.get('tab') || 'avanzamento');
-    go('#/admin/eventi');
+    if (!A.ready) return;
+    const token = ++A.token;
+    if (parts[0] === 'esci') {
+      A.client.auth.signOut().finally(() => { A.me = null; go('#/admin'); });
+      return;
+    }
+    A.client.auth.getSession().then(async ({ data }) => {
+      if (token !== A.token) return;
+      const session = data && data.session;
+      if (!session) return viewLogin();
+      if (parts[0] === 'password' || A.setPassword) return viewSetPassword();
+      if (!A.me) {
+        try { A.me = await call('lab_admin_me'); } catch (e) { return shellError(e); }
+        if (token !== A.token) return;
+      }
+      if (!A.me) return viewNoAccess(session.user && session.user.email);
+      if (!parts[0] || parts[0] === 'eventi') return viewEvents(token);
+      if (parts[0] === 'nuovo') return viewNewEvent();
+      if (parts[0] === 'e' && parts[1]) return openEvent(parts[1], query.get('tab') || 'avanzamento', token);
+      go('#/admin/eventi');
+    });
   }
   function shellA(inner) {
     app.innerHTML = `
       <header class="bar"><div class="bar-in">${brand('#/admin/eventi')}
         <div class="bar-event"><span class="mono">Area RankWit</span><strong>Portale del Lab</strong></div>
         <nav class="admin-nav" aria-label="Pannello"><a href="#/admin/eventi" class="is-current">Eventi</a></nav>
-        <div class="bar-right"><span class="small">${esc(S.admin.get())}</span><a href="#/admin/esci">Esci</a></div>
+        <div class="bar-right"><span class="small">${esc(A.me ? A.me.email : '')}${isData() ? ' · dati' : ''}</span><a href="#/admin/esci">Esci</a></div>
       </div></header>
       <main id="main" class="wrap">${inner}</main>`;
+  }
+  function shellError(e) {
+    shellA(`<div class="card narrow" style="margin:40px auto"><h1>Qualcosa non va</h1><p class="muted" style="margin-top:10px">${esc(errText(e))}</p><p style="margin-top:16px"><button class="btn ghost" type="button" id="retry">Riprova</button></p></div>`);
+    $('#retry').addEventListener('click', render);
+  }
+  function viewNoAccess(mail) {
+    app.innerHTML = `
+      <header class="bar"><div class="bar-in">${brand('index.html')}</div></header>
+      <main class="home"><div class="card stack">
+        <span class="label">Area RankWit</span><h1>Accesso non abilitato</h1>
+        <p class="muted">L’indirizzo ${esc(mail || '')} non ha accesso al pannello. Chiedi a chi gestisce il Lab.</p>
+        <p><a class="btn ghost" href="#/admin/esci">Esci</a></p>
+      </div></main>`;
   }
 
   function viewLogin() {
@@ -765,20 +884,89 @@
         <label class="field"><span>Password</span><input type="password" id="l-pass" autocomplete="current-password"></label>
         <p class="err" id="l-err" role="alert" hidden></p>
         <button class="btn primary" type="submit">Entra</button>
-        <p class="note small">Prototipo: entra qualsiasi email @rankwit.ai con qualsiasi password. In produzione l’accesso lo controlla il server, con secondo fattore.</p>
+        <p class="small"><button class="linkbtn" type="button" id="l-forgot">Password dimenticata?</button></p>
+        <p class="note small">Solo per il team RankWit. Per avere l’accesso chiedi a chi gestisce il Lab.</p>
       </form></main>`;
-    $('#login').addEventListener('submit', e => {
+    const err = msg => { $('#l-err').hidden = !msg; $('#l-err').textContent = msg || ''; };
+    $('#login').addEventListener('submit', async e => {
       e.preventDefault();
       const mail = $('#l-mail').value.trim().toLowerCase();
-      if (!/^[^@\s]+@rankwit\.ai$/.test(mail) || !$('#l-pass').value) {
-        const err = $('#l-err');
-        err.hidden = false;
-        err.textContent = 'Serve un’email @rankwit.ai e una password.';
-        return;
-      }
-      S.admin.set(mail);
+      if (!mail || !$('#l-pass').value) { err('Scrivi email e password.'); return; }
+      $('#login button[type=submit]').disabled = true;
+      const { error } = await A.client.auth.signInWithPassword({ email: mail, password: $('#l-pass').value });
+      $('#login button[type=submit]').disabled = false;
+      if (error) { err(/invalid/i.test(error.message) ? 'Email o password non corretti.' : errText(error)); return; }
+      A.me = null;
       go('#/admin/eventi');
     });
+    $('#l-forgot').addEventListener('click', async () => {
+      const mail = $('#l-mail').value.trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+$/.test(mail)) { err('Scrivi prima la tua email.'); $('#l-mail').focus(); return; }
+      const { error } = await A.client.auth.resetPasswordForEmail(mail, { redirectTo: location.origin + location.pathname });
+      err(error ? errText(error) : '');
+      if (!error) toast('Se l’indirizzo ha accesso, ti arriva un’email per scegliere una nuova password.', 6000);
+    });
+  }
+
+  function viewSetPassword() {
+    app.innerHTML = `
+      <header class="bar"><div class="bar-in">${brand('index.html')}</div></header>
+      <main class="home"><form class="card stack" id="pw" novalidate>
+        <span class="label">Area RankWit</span><h1>Scegli la password</h1>
+        <label class="field"><span>Nuova password</span><input type="password" id="p-1" autocomplete="new-password"><small>Almeno 10 caratteri.</small></label>
+        <label class="field"><span>Ripeti la password</span><input type="password" id="p-2" autocomplete="new-password"></label>
+        <p class="err" id="p-err" role="alert" hidden></p>
+        <button class="btn primary" type="submit">Salva la password</button>
+      </form></main>`;
+    $('#p-1').focus();
+    $('#pw').addEventListener('submit', async e => {
+      e.preventDefault();
+      const a = $('#p-1').value;
+      const b = $('#p-2').value;
+      const err = msg => { $('#p-err').hidden = false; $('#p-err').textContent = msg; };
+      if (a.length < 10) return err('Serve una password di almeno 10 caratteri.');
+      if (a !== b) return err('Le due password non sono uguali.');
+      const { error } = await A.client.auth.updateUser({ password: a });
+      if (error) return err(errText(error));
+      A.setPassword = false;
+      toast('Password salvata.');
+      go('#/admin/eventi');
+    });
+  }
+
+  // ---------- dati dal server ----------
+  function putEvent(row) {
+    const ev = Object.assign({}, row);
+    ['in_corso', 'n_participants', 'n_done'].forEach(k => delete ev[k]);
+    S.adminMerge({ events: [ev] });
+  }
+  function setCurrent(id, on) {
+    const cur = S.configEvent();
+    if (on) S.setServerCurrent(id);
+    else if (cur && cur.id === id) S.setServerCurrent(null);
+  }
+  async function loadEvents() {
+    const list = await call('lab_admin_events');
+    let current = null;
+    list.forEach(e => {
+      A.meta[e.id] = { in_corso: e.in_corso, n_participants: e.n_participants, n_done: e.n_done };
+      if (e.in_corso) current = e.id;
+      putEvent(e);
+    });
+    S.setServerCurrent(current);
+    return list;
+  }
+  // Tutte le righe la prima volta, poi solo quelle arrivate dopo (con un minuto di margine).
+  async function loadEvent(id) {
+    const since = A.loaded[id] ? new Date(new Date(A.loaded[id]).getTime() - 60000).toISOString() : null;
+    const res = await call('lab_admin_event', { p_event: id, p_since: since });
+    if (!res || !res.event) return false;
+    putEvent(res.event);
+    A.meta[id] = Object.assign(A.meta[id] || {}, { in_corso: !!res.in_corso });
+    setCurrent(id, !!res.in_corso);
+    S.adminMerge(res.tables, res.deleted);
+    A.loaded[id] = res.now;
+    return true;
   }
 
   // Chi ha finito i quattro esercizi conta come «Ha finito», ovunque si trovi.
@@ -793,19 +981,23 @@
     return { ps, done };
   }
 
-  function viewEvents() {
-    const evs = S.all('events').slice().sort((a, b) => (a.date < b.date ? 1 : -1));
+  async function viewEvents(token) {
+    let list;
+    try { list = await loadEvents(); } catch (e) { if (token === A.token) shellError(e); return; }
+    if (token !== A.token) return;
+    const evs = list.map(e => S.byId('events', e.id)).filter(Boolean);
     shellA(`
       <div class="row head"><h1>Eventi</h1><span class="spacer"></span><a class="btn primary" href="#/admin/nuovo">Nuovo evento</a></div>
-      <div class="table-wrap"><table class="t">
-        <thead><tr><th>Evento</th><th>Data</th><th>Indirizzo</th><th>Stato</th><th class="num">Partecipanti</th><th class="num">Hanno finito</th></tr></thead>
+      ${evs.length ? `<div class="table-wrap"><table class="t">
+        <thead><tr><th>Evento</th><th>Data</th><th>Link per i partecipanti</th><th>Stato</th><th class="num">Partecipanti</th><th class="num">Hanno finito</th></tr></thead>
         <tbody>${evs.map(ev => {
-          const st = eventStats(ev);
-          return `<tr><td><a href="#/admin/e/${ev.id}"><strong>${esc(ev.name)}</strong></a><br><span class="muted small">${esc(ev.place)}</span></td>
-            <td>${fmtDate(ev.date)}</td><td class="mono" style="text-transform:none">lab.rankwit.ai/${esc(ev.code)}</td>
+          const m = A.meta[ev.id] || {};
+          return `<tr><td><a href="#/admin/e/${ev.id}"><strong>${esc(ev.name)}</strong></a><br><span class="muted small">${esc(ev.place || (ev.source === 'pc' ? 'Creato da un PC con evento.js' : ''))}</span></td>
+            <td>${ev.date ? fmtDate(ev.date) : ''}</td><td class="mono" style="text-transform:none">${esc(homeLink(ev))}${m.in_corso ? ' <span class="tag accent">in corso</span>' : ''}</td>
             <td><span class="status ${ev.status}">${esc(ev.status)}</span></td>
-            <td class="num">${st.ps.length} / ${ev.capacity}</td><td class="num">${st.done.length}</td></tr>`;
-        }).join('')}</tbody></table></div>`);
+            <td class="num">${m.n_participants || 0} / ${ev.capacity}</td><td class="num">${m.n_done || 0}</td></tr>`;
+        }).join('')}</tbody></table></div>` : '<div class="empty">Ancora nessun evento. Crea il primo con «Nuovo evento».</div>'}
+      <p class="muted small" style="margin-top:12px">I link senza codice (per esempio esercizio-2.html) aprono l’evento in corso: quello aperto con la data di oggi o, se non c’è, il più recente.</p>`);
   }
 
   function viewNewEvent() {
@@ -814,10 +1006,10 @@
       <div class="head" style="margin-top:12px"><h1>Nuovo evento</h1></div>
       <form class="card stack" id="nev" novalidate style="max-width:860px">
         <div class="form-grid">
-          <label class="field full"><span>Nome dell’evento</span><input type="text" id="n-name" placeholder="AI Visibility Lab"></label>
+          <label class="field full"><span>Nome dell’evento</span><input type="text" id="n-name" placeholder="AI Visibility Lab · Montagna Pistoiese"><small>Compare in alto in ogni pagina dei partecipanti.</small></label>
           <label class="field"><span>Data</span><input type="date" id="n-date"></label>
           <label class="field"><span>Luogo</span><input type="text" id="n-place" placeholder="Città (PR)"></label>
-          <label class="field"><span>Indirizzo breve</span><input type="text" id="n-code" placeholder="citta" style="font-family:var(--mono)"><small id="n-url">lab.rankwit.ai/…</small></label>
+          <label class="field"><span>Codice</span><input type="text" id="n-code" placeholder="citta" style="font-family:var(--mono)"><small id="n-url">index.html?evento=…</small></label>
           <label class="field full"><span>Domanda per l’esercizio 2</span><textarea id="n-prompt" rows="2">Cosa vedere a {comune} e dintorni in un weekend, e dove dormire?</textarea><small>{comune} diventa il comune di ciascun partecipante. Per una domanda uguale per tutti, scrivi il nome del territorio.</small></label>
           <fieldset class="field" style="border:0;padding:0;margin:0"><legend style="font-weight:600;font-size:15px;margin-bottom:8px">Motori</legend>
             <div class="row">${Object.keys(D.MODELS).map(k => `<label class="check"><input type="checkbox" name="n-model" value="${k}" checked><span>${D.MODELS[k].name}</span></label>`).join('')}</div></fieldset>
@@ -830,12 +1022,12 @@
       </form>`);
     const slug = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '').slice(0, 30);
     let codeTouched = false;
-    const syncUrl = () => { $('#n-url').textContent = 'lab.rankwit.ai/' + ($('#n-code').value || '…'); };
+    const syncUrl = () => { $('#n-url').textContent = 'index.html?evento=' + ($('#n-code').value || '…'); };
     $('#n-place').addEventListener('input', () => {
       if (!codeTouched) { $('#n-code').value = slug($('#n-place').value.replace(/\(.*?\)/g, '')); syncUrl(); }
     });
     $('#n-code').addEventListener('input', () => { codeTouched = true; syncUrl(); });
-    $('#nev').addEventListener('submit', e => {
+    $('#nev').addEventListener('submit', async e => {
       e.preventDefault();
       const code = $('#n-code').value.trim().toLowerCase();
       const models = $$('input[name=n-model]:checked').map(i => i.value);
@@ -843,25 +1035,48 @@
       if (!$('#n-name').value.trim()) problems.push('il nome');
       if (!$('#n-date').value) problems.push('la data');
       if (!$('#n-place').value.trim()) problems.push('il luogo');
-      if (!/^[a-z0-9-]{3,30}$/.test(code)) problems.push('l\u2019indirizzo breve, da 3 a 30 lettere o numeri');
-      else if (S.eventByCode(code)) problems.push('l\u2019indirizzo breve, già usato da un altro evento');
-      if (!$('#n-prompt').value.trim()) problems.push('la domanda per l\u2019esercizio 2');
+      if (!/^[a-z0-9-]{3,30}$/.test(code)) problems.push('il codice, da 3 a 30 lettere o numeri');
+      else if (S.eventByCode(code)) problems.push('il codice, già usato da un altro evento');
+      if (!$('#n-prompt').value.trim()) problems.push('la domanda per l’esercizio 2');
       if (!models.length) problems.push('serve almeno un motore');
-      if (problems.length) {
-        $('#n-err').hidden = false;
-        $('#n-err').textContent = 'Controlla: ' + problems.join('; ') + '.';
-        return;
+      const showErr = msg => { $('#n-err').hidden = false; $('#n-err').textContent = msg; };
+      if (problems.length) return showErr('Controlla: ' + problems.join('; ') + '.');
+      $('#nev button[type=submit]').disabled = true;
+      try {
+        const res = await call('lab_admin_save_event', { p: {
+          code, name: $('#n-name').value.trim(), date: $('#n-date').value, place: $('#n-place').value.trim(),
+          territory_label: $('#n-place').value.trim(), prompts: [$('#n-prompt').value.trim()],
+          models, capacity: Number($('#n-cap').value) || 50,
+          consent_version: $('#n-consent').value.trim(), status: $('#n-status').value
+        } });
+        S.applyServerEvent(res);
+        toast('Evento creato.');
+        go('#/admin/e/' + res.event.id);
+      } catch (err) {
+        $('#nev button[type=submit]').disabled = false;
+        showErr(/già usato/.test(err.message) ? 'Controlla: il codice, già usato da un altro evento.' : errText(err));
       }
-      const ev = S.createEvent({
-        code, name: $('#n-name').value.trim(), date: $('#n-date').value, place: $('#n-place').value.trim(),
-        territory_label: $('#n-place').value.trim(), prompts: [$('#n-prompt').value.trim()],
-        models, capacity: $('#n-cap').value,
-        consent_version: $('#n-consent').value.trim(), status: $('#n-status').value
-      });
-      S.save();
-      toast('Evento creato.');
-      go('#/admin/e/' + ev.id);
     });
+  }
+
+  async function openEvent(id, tab, token) {
+    let ok;
+    try { ok = await loadEvent(id); } catch (e) { if (token === A.token) shellError(e); return; }
+    if (token !== A.token) return;
+    if (!ok) { go('#/admin/eventi'); return; }
+    viewEvent(S.byId('events', id), tab);
+  }
+  // Salva campi dell'evento sul server, poi ridisegna.
+  async function saveEvent(ev, patch, msg) {
+    try {
+      const res = await call('lab_admin_save_event', { p: Object.assign({ id: ev.id }, patch) });
+      S.applyServerEvent(res);
+      if (msg) toast(msg);
+      return true;
+    } catch (e) {
+      toast(errText(e), 6000);
+      return false;
+    }
   }
 
   function viewEvent(ev, tab) {
@@ -873,19 +1088,21 @@
     const nEval = S.filter('evaluations', e => e.event_id === ev.id && e.rating).length;
     const byStage = ['faq', 'territorio', 'hotel', 'posizionamento', 'fine'].map(s => [s, st.ps.filter(p => stageOf(p) === s).length]);
     const maxStage = Math.max(1, ...byStage.map(x => x[1]));
-    const url = 'lab.rankwit.ai/' + ev.code;
+    const url = partLink(ev);
+    const current = !!(A.meta[ev.id] || {}).in_corso;
     const tabs = [['avanzamento', 'Avanzamento'], ['domande', 'Domande e motori'], ['risultati', 'Risultati'], ['export', 'Export']];
     shellA(`
       <p><a href="#/admin/eventi">${BACK} Eventi</a></p>
       <div class="row" style="margin-top:12px;align-items:flex-start">
-        <div><h1>${esc(ev.name)}</h1><p class="muted" style="margin-top:6px">${fmtDate(ev.date)} · ${esc(ev.place)}</p></div>
+        <div><h1>${esc(ev.name)}</h1><p class="muted" style="margin-top:6px">${ev.date ? fmtDate(ev.date) : ''}${ev.place ? ' · ' + esc(ev.place) : ''}</p></div>
         <span class="spacer"></span>
         <label class="row small"><span class="muted">Stato</span>
           <select id="ev-status" style="width:auto">${['bozza', 'aperto', 'chiuso'].map(s => `<option value="${s}" ${ev.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
       </div>
       <div class="row" style="margin-top:16px">
-        <div class="url-box"><span>${esc(url)}</span><button class="btn ghost small" type="button" id="copy-url">Copia</button></div>
+        <div class="url-box"><span>${esc(shortUrl(url))}</span><button class="btn ghost small" type="button" id="copy-url">Copia</button></div>
         <a class="btn ghost small" href="${homeLink(ev)}" target="_blank" rel="noopener">Apri come partecipante</a>
+        ${current ? '<span class="tag accent">in corso</span>' : ''}
       </div>
       <section class="card section">
         <div class="row"><h2>Gli esercizi</h2><span class="spacer"></span><span class="muted small">Si fanno in ordine. Dai il link di un esercizio quando è il momento: nessuna pagina porta alla successiva.</span></div>
@@ -893,7 +1110,7 @@
           const n = st.ps.filter(p => p.progress[x.id]).length;
           return `<div class="ex-admin-row">
             <span class="ex-n">${x.n}</span>
-            <div><strong>${esc(x.long)}</strong><span class="mono" style="text-transform:none;display:block">${esc(prodLink(ev, x.n))}</span></div>
+            <div><strong>${esc(x.long)}</strong><span class="mono" style="text-transform:none;display:block">${esc(shortUrl(partExLink(ev, x.n)))}</span></div>
             <span class="small muted">${n} di ${st.ps.length} hanno finito</span>
             <div class="row ex-actions">
               <button class="btn ghost small" type="button" data-exlink="${x.n}">Copia link</button>
@@ -901,7 +1118,7 @@
             </div>
           </div>`;
         }).join('')}</div>
-        <p class="muted small" style="margin-top:12px">Nel prototipo i link funzionano su questo computer. In produzione saranno ${esc(prodLink(ev))}/1, /2, /3 e /4.</p>
+        <p class="muted small" style="margin-top:12px">${current ? 'È l’evento in corso: i link senza codice aprono questo evento.' : ev.status === 'aperto' ? 'I link contengono il codice dell’evento. L’evento in corso, per i link senza codice, è un altro.' : 'Per far entrare i partecipanti metti lo stato su «aperto».'}</p>
       </section>
       <div class="kpis section">
         <div class="kpi"><span class="label">Partecipanti</span><p class="v">${st.ps.length} <small>/ ${ev.capacity}</small></p><p>posti occupati</p></div>
@@ -913,37 +1130,50 @@
         <div class="stage-bars">${byStage.map(([s, n]) => `<div><span>${STAGE_LABEL[s]}</span><span><b style="width:${(n / maxStage) * 100}%" title="${STAGE_LABEL[s]}: ${n}"></b></span><span class="num">${n}</span></div>`).join('')}</div></div>
       <nav class="tabs" aria-label="Sezioni dell’evento">${tabs.map(([k, l]) => `<a href="#/admin/e/${ev.id}?tab=${k}" class="${tab === k ? 'is-current' : ''}" ${tab === k ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
       <div id="tab"></div>`);
-    $('#ev-status').addEventListener('change', e => { const cur = S.byId('events', ev.id); cur.status = e.target.value; S.save(); toast('Stato: ' + cur.status + '.'); render(); });
-    $('#copy-url').addEventListener('click', async () => toast(await copy('https://' + url) ? 'Indirizzo copiato.' : 'Non riesco a copiare.'));
-    const base = location.href.replace(/admin\.html.*$/, '');
-    $$('[data-exlink]').forEach(b => b.addEventListener('click', async () => toast(await copy(base + exLink(ev, Number(b.dataset.exlink))) ? 'Link dell’esercizio ' + b.dataset.exlink + ' copiato.' : 'Non riesco a copiare.')));
+    $('#ev-status').addEventListener('change', async e => {
+      if (await saveEvent(ev, { status: e.target.value }, 'Stato: ' + e.target.value + '.')) render();
+    });
+    $('#copy-url').addEventListener('click', async () => toast(await copy(url) ? 'Indirizzo copiato.' : 'Non riesco a copiare.'));
+    $$('[data-exlink]').forEach(b => b.addEventListener('click', async () => toast(await copy(partExLink(ev, Number(b.dataset.exlink))) ? 'Link dell’esercizio ' + b.dataset.exlink + ' copiato.' : 'Non riesco a copiare.')));
     ({ avanzamento: tabProgress, domande: tabQuestions, risultati: tabResults, export: tabExport }[tab] || tabProgress)(ev);
-    // Aggiornamento dal vivo quando un partecipante salva in un'altra scheda.
-    // Si ridisegna una volta sola, dopo una pausa, togliendo i vecchi ascoltatori.
+    // Aggiornamento dal vivo: ogni 10 secondi le righe nuove dal server. Si ridisegna
+    // solo se è cambiato qualcosa, tenendo la posizione; la scheda delle domande no,
+    // per non disturbare chi scrive.
+    const token = A.token;
+    let stopped = false;
     let timer = null;
-    const refresh = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        const fresh = S.byId('events', ev.id);
-        if (!fresh) { go('#/admin/eventi'); return; }
-        if (tab === 'domande') return;
+    const tick = async () => {
+      if (stopped) return;
+      const before = A.loaded[ev.id];
+      let changed = false;
+      try {
+        const n0 = S.TABLES.reduce((n, t) => n + S.all(t).length, 0);
+        const sig0 = JSON.stringify(S.byId('events', ev.id));
+        const res = await call('lab_admin_event', { p_event: ev.id, p_since: new Date(new Date(before).getTime() - 60000).toISOString() });
+        if (stopped || token !== A.token) return;
+        if (!res || !res.event) { go('#/admin/eventi'); return; }
+        putEvent(res.event);
+        A.meta[ev.id] = Object.assign(A.meta[ev.id] || {}, { in_corso: !!res.in_corso });
+        setCurrent(ev.id, !!res.in_corso);
+        const fresh = Object.keys(res.tables).some(t => res.tables[t].some(r => !r.received_at || r.received_at > before)) || res.deleted.length > 0;
+        S.adminMerge(res.tables, res.deleted);
+        A.loaded[ev.id] = res.now;
+        changed = fresh || S.TABLES.reduce((n, t) => n + S.all(t).length, 0) !== n0 || JSON.stringify(S.byId('events', ev.id)) !== sig0;
+      } catch (e) { /* si riprova al prossimo giro */ }
+      if (stopped || token !== A.token) return;
+      if (changed && tab !== 'domande') {
         const y = window.scrollY;
         cleanups.forEach(fn => fn());
         cleanups = [];
-        viewEvent(fresh, tab);
+        viewEvent(S.byId('events', ev.id), tab);
         window.scrollTo(0, y);
-      }, 1500);
+        return;
+      }
+      if (tab === 'avanzamento') tabProgress(S.byId('events', ev.id));
+      timer = setTimeout(tick, POLL);
     };
-    const off = S.onChange(e => { if (e.type === 'external') refresh(); });
-    onCleanup(() => clearTimeout(timer));
-    // Ogni 30 secondi aggiorna gli orari; se l'evento non c'è più (dati ripristinati altrove) torna all'elenco.
-    const iv = setInterval(() => {
-      const fresh = S.byId('events', ev.id);
-      if (!fresh) { go('#/admin/eventi'); return; }
-      if (tab === 'avanzamento') tabProgress(fresh);
-    }, 30000);
-    onCleanup(off);
-    onCleanup(() => clearInterval(iv));
+    timer = setTimeout(tick, POLL);
+    onCleanup(() => { stopped = true; clearTimeout(timer); });
   }
 
   function tabProgress(ev) {
@@ -952,6 +1182,7 @@
     const list = ps.filter(p => ui.filter === 'tutti' || (ui.filter === 'finito' ? done(p) : !done(p)))
       .sort((a, b) => (a.last_seen_at < b.last_seen_at ? 1 : -1));
     const nDone = ps.filter(done).length;
+    const del = ui.names && isData();
     $('#tab').innerHTML = `
       <div class="filters">
         ${[['tutti', 'Tutti', ps.length], ['corso', 'In corso', ps.length - nDone], ['finito', 'Hanno finito', nDone]].map(([k, l, n]) => `<button class="pill" type="button" data-f="${k}" aria-pressed="${ui.filter === k}">${l} · ${n}</button>`).join('')}
@@ -959,17 +1190,29 @@
         <label class="check small"><input type="checkbox" id="show-names" ${ui.names ? 'checked' : ''}><span>Mostra struttura e comune</span></label>
       </div>
       ${list.length ? `<div class="table-wrap"><table class="t">
-        <thead><tr><th>ID</th>${ui.names ? '<th>Struttura</th><th>Comune</th>' : ''}<th>Esercizi</th><th>Adesso</th><th>Ultimo salvataggio</th></tr></thead>
+        <thead><tr><th>ID</th>${ui.names ? '<th>Struttura</th><th>Comune</th>' : ''}<th>Esercizi</th><th>Adesso</th><th>Ultimo salvataggio</th>${del ? '<th><span class="sr">Cancella</span></th>' : ''}</tr></thead>
         <tbody>${list.map(p => {
-          const prop = S.byId('properties', p.property_id);
+          const prop = S.byId('properties', p.property_id) || {};
           return `<tr><td class="mono" style="text-transform:none">${esc(p.id)}</td>
             ${ui.names ? `<td>${esc(prop.name)}</td><td>${esc(prop.comune)}</td>` : ''}
             <td><span class="dots" aria-label="${STEPS.filter(s => p.progress[s]).length} esercizi su 4">${STEPS.map(s => `<i class="${p.progress[s] ? 'is-done' : p.current_step === s ? 'is-current' : ''}" title="${STAGE_LABEL[s]}"></i>`).join('')}</span></td>
-            <td>${STAGE_LABEL[stageOf(p)]}</td><td class="muted">${ago(p.last_seen_at)}</td></tr>`;
+            <td>${STAGE_LABEL[stageOf(p)]}</td><td class="muted">${p.last_seen_at ? ago(p.last_seen_at) : ''}</td>
+            ${del ? `<td><button class="linkbtn" type="button" data-del="${esc(p.id)}">Cancella</button></td>` : ''}</tr>`;
         }).join('')}</tbody></table></div>` : '<div class="empty">Nessun partecipante in questo gruppo.</div>'}
-      <p class="muted small" style="margin-top:12px">Si aggiorna da solo quando un partecipante salva. I nomi sono nascosti di default: le tabelle di analisi usano solo l’ID.</p>`;
+      <p class="muted small" style="margin-top:12px">Si aggiorna da solo ogni 10 secondi. I nomi sono nascosti di default: le tabelle di analisi usano solo l’ID.${isData() ? ' Per cancellare i dati di una struttura su richiesta, mostra struttura e comune e premi «Cancella».' : ''}</p>`;
     $$('#tab [data-f]').forEach(b => b.addEventListener('click', () => { ui.filter = b.dataset.f; tabProgress(ev); }));
     $('#show-names').addEventListener('change', e => { ui.names = e.target.checked; tabProgress(ev); });
+    $$('#tab [data-del]').forEach(b => b.addEventListener('click', async () => {
+      const p = S.byId('participants', b.dataset.del);
+      const prop = p ? S.byId('properties', p.property_id) || {} : {};
+      if (!p || !confirm('Cancellare tutti i dati di ' + (prop.name || p.id) + (prop.comune ? ' (' + prop.comune + ')' : '') + '? Non si può annullare.')) return;
+      try {
+        await call('lab_admin_delete_participant', { p_pid: p.id });
+        await loadEvent(ev.id);
+        toast('Dati cancellati.');
+        render();
+      } catch (e) { toast(errText(e), 6000); }
+    }));
   }
 
   function tabQuestions(ev) {
@@ -979,7 +1222,7 @@
       <div class="grid-2">
         <section class="card stack">
           <h2>Domanda per il territorio</h2>
-          <p class="muted small">Esercizio 2. Una domanda in uso alla volta. Scrivi {comune} dove vuoi il comune di ciascun partecipante. Cambiarla durante l’evento rende le risposte non confrontabili.</p>
+          <p class="muted small">Esercizio 2. Una domanda in uso alla volta. Scrivi {comune} dove vuoi il comune di ciascun partecipante. Cambiarla durante l’evento rende le risposte non confrontabili. I PC la ricevono alla pagina successiva che aprono.</p>
           ${qs.map(q => {
             const s = sent(q);
             return `<div class="prompt-row">
@@ -997,27 +1240,35 @@
             <div class="row">${Object.keys(D.MODELS).map(k => `<label class="check"><input type="checkbox" name="s-model" value="${k}" ${ev.models.indexOf(k) >= 0 ? 'checked' : ''}><span>${D.MODELS[k].name}</span></label>`).join('')}</div></fieldset>
           <p class="muted small">Si aprono senza account. La ricerca sul web la decide il motore.</p>
           <div class="form-grid">
+            <label class="field full"><span>Nome dell’evento</span><input type="text" id="s-name" value="${esc(ev.name)}"></label>
+            <label class="field"><span>Data</span><input type="date" id="s-date" value="${esc(ev.date || '')}"></label>
             <label class="field"><span>Posti</span><input type="number" id="s-cap" value="${ev.capacity}" min="1"></label>
             <label class="field full"><span>Versione dell’informativa</span><input type="text" id="s-consent" value="${esc(ev.consent_version)}"><small>Quella firmata su carta all’ingresso.</small></label>
           </div>
           <div><button class="btn primary" type="button" id="s-save">Salva le impostazioni</button></div>
         </section>
       </div>`;
-    $$('#tab input[name=tq]').forEach(r => r.addEventListener('change', () => { const cur = S.byId('events', ev.id); cur.territory_question_id = r.value; S.save(); toast('Domanda in uso aggiornata.'); tabQuestions(cur); }));
-    $$('#tab [data-tq]').forEach(i => i.addEventListener('input', debounce(() => { S.update('questions', i.dataset.tq, { text: i.value }); S.save(); }, 400)));
-    $('#tq-add').addEventListener('click', () => {
+    const cur = () => S.byId('events', ev.id);
+    $$('#tab input[name=tq]').forEach(r => r.addEventListener('change', async () => {
+      if (await saveEvent(cur(), { territory_question_id: r.value }, 'Domanda in uso aggiornata.')) tabQuestions(cur());
+    }));
+    $$('#tab [data-tq]').forEach(i => i.addEventListener('input', debounce(async () => {
+      if (!i.value.trim()) return;
+      try { S.applyServerEvent(await call('lab_admin_save_question', { p_event: ev.id, p_id: i.dataset.tq, p_text: i.value })); } catch (e) { toast(errText(e), 6000); }
+    }, 600)));
+    $('#tq-add').addEventListener('click', async () => {
       const t = $('#tq-new').value.trim();
       if (!t) return;
-      S.insert('questions', { id: S.uid('Q-'), event_id: ev.id, exercise_id: 'territorio', participant_id: null, key: null, text: t, source: 'evento', position: qs.length, created_at: new Date().toISOString() });
-      S.save();
-      tabQuestions(ev);
+      try {
+        S.applyServerEvent(await call('lab_admin_save_question', { p_event: ev.id, p_id: null, p_text: t }));
+        tabQuestions(cur());
+      } catch (e) { toast(errText(e), 6000); }
     });
-    $('#s-save').addEventListener('click', () => {
+    $('#s-save').addEventListener('click', async () => {
       const models = $$('#tab input[name=s-model]:checked').map(i => i.value);
       if (!models.length) { toast('Serve almeno un motore.'); return; }
-      Object.assign(S.byId('events', ev.id), { models, capacity: Number($('#s-cap').value) || ev.capacity, consent_version: $('#s-consent').value.trim() || ev.consent_version });
-      S.save();
-      toast('Impostazioni salvate.');
+      if (!$('#s-name').value.trim()) { toast('Serve il nome dell’evento.'); return; }
+      if (await saveEvent(cur(), { models, name: $('#s-name').value.trim(), date: $('#s-date').value, capacity: Number($('#s-cap').value) || ev.capacity, consent_version: $('#s-consent').value.trim() || ev.consent_version }, 'Impostazioni salvate.')) render();
     });
   }
 
@@ -1135,6 +1386,7 @@
   }
   function tabExport(ev) {
     const day = new Date().toISOString().slice(0, 10);
+    if (!isData()) ui.ident = false;
     const pids = new Set(S.filter('participants', p => p.event_id === ev.id).map(p => p.id));
     const runIds = new Set(S.filter('model_runs', r => r.event_id === ev.id).map(r => r.id));
     // Senza la spunta, ogni testo libero passa dal filtro che toglie nomi e comuni.
@@ -1152,7 +1404,7 @@
       evaluations: { label: 'Valutazioni', desc: 'Giudizio del partecipante su ogni risposta (nell’esercizio 3, per domanda), con nota.', rows: () => scrub(S.filter('evaluations', e => e.event_id === ev.id), 'note', r => r.participant_id) }
     };
     $('#tab').innerHTML = `
-      <label class="check" style="margin-bottom:16px"><input type="checkbox" id="ident" ${ui.ident ? 'checked' : ''}><span><strong>Includi i dati identificabili</strong> (nome della struttura, comune, sito). Senza spunta, in tutti i file i nomi delle strutture diventano [struttura] e il comune di ciascuno [comune]. Il filtro riconosce i nomi scritti per intero o senza «Hotel», «B&B» e simili: un soprannome o un errore di battitura resta.</span></label>
+      ${isData() ? `<label class="check" style="margin-bottom:16px"><input type="checkbox" id="ident" ${ui.ident ? 'checked' : ''}><span><strong>Includi i dati identificabili</strong> (nome della struttura, comune, sito). Senza spunta, in tutti i file i nomi delle strutture diventano [struttura] e il comune di ciascuno [comune]. Il filtro riconosce i nomi scritti per intero o senza «Hotel», «B&B» e simili: un soprannome o un errore di battitura resta.</span></label>` : '<p class="note small" style="margin-bottom:16px">In tutti i file i nomi delle strutture diventano [struttura] e il comune di ciascuno [comune]. I file con i dati identificabili li scarica solo chi ha il ruolo «dati».</p>'}
       <div class="export-list">
         <div class="item main"><div><strong>Risposte e valutazioni</strong><p>Una riga per ogni risposta valutata: motore, domanda esatta, ora di apertura e di incolla, testo incollato, comune citato, valutazione e nota.</p></div>
           <span class="muted small">${exportJoined(ev, false).length} righe</span><button class="btn primary small" type="button" data-x="_joined">Scarica CSV</button></div>
@@ -1163,23 +1415,14 @@
             <span class="muted small">${t.rows().length} righe</span><button class="btn ghost small" type="button" data-x="${k}" ${off ? 'disabled title="Spunta i dati identificabili"' : ''}>Scarica CSV</button></div>`;
         }).join('')}
       </div>
-      <p class="muted small" style="margin-top:14px">CSV con punto e virgola e codifica UTF-8: si apre direttamente in Excel.</p>
-      <section class="card section"><h2>Dati dimostrativi</h2>
-        <p class="muted small" style="margin:6px 0 14px">Cancella tutto ciò che è stato fatto in questo browser. Tornano l’evento «prova», vuoto, e l’evento di esempio con 24 strutture inventate.</p>
-        <button class="btn danger" type="button" id="reset">Ripristina i dati dimostrativi</button></section>`;
-    $('#ident').addEventListener('change', e => { ui.ident = e.target.checked; tabExport(ev); });
+      <p class="muted small" style="margin-top:14px">CSV con punto e virgola e codifica UTF-8: si apre direttamente in Excel. I dati si cancellano da soli 12 mesi dopo la data del Lab.</p>`;
+    if ($('#ident')) $('#ident').addEventListener('change', e => { ui.ident = e.target.checked; tabExport(ev); });
     $$('#tab [data-x]').forEach(b => b.addEventListener('click', () => {
       const k = b.dataset.x;
       const suffix = ui.ident ? '-identificabili' : '';
       if (k === '_joined') download('lab-' + ev.code + '-risposte-valutazioni' + suffix + '-' + day + '.csv', S.toCSV(exportJoined(ev, ui.ident), ui.ident ? JOINED_COLS.concat(['struttura', 'comune', 'sito']) : JOINED_COLS));
       else download('lab-' + ev.code + '-' + k + '-' + day + '.csv', S.toCSV(tables[k].rows()));
     }));
-    $('#reset').addEventListener('click', () => {
-      if (!confirm('Ripristinare i dati dimostrativi? Si perde tutto quello che è stato fatto in questo browser.')) return;
-      S.reset();
-      toast('Dati dimostrativi ripristinati.');
-      go('#/admin/eventi');
-    });
   }
 
   // ---------- suggerimenti sui grafici ----------
@@ -1200,5 +1443,26 @@
   document.addEventListener('focusout', () => { tip.hidden = true; });
   window.addEventListener('scroll', () => { tip.hidden = true; }, { passive: true });
 
-  render();
+  // ---------- avvio ----------
+  // Le pagine prendono il Lab di oggi dal server. Se il PC lo conosce già si parte
+  // subito e lo si aggiorna in sottofondo (si ridisegna solo se è cambiato e non si
+  // è ancora scritto niente); la prima volta si aspetta il server al massimo 3
+  // secondi, poi vale evento.js.
+  let touched = false;
+  document.addEventListener('input', () => { touched = true; }, true);
+  document.addEventListener('change', () => { touched = true; }, true);
+  function boot() {
+    if (PAGE === 'admin') { adminBoot(); return; }
+    if (!SY) { render(); return; }
+    const code = (new URLSearchParams(location.search).get('evento') || '').trim().toLowerCase();
+    const known = code ? !!S.eventByCode(code) : S.serverCurrentKnown();
+    let shown = false;
+    const show = () => { if (!shown) { shown = true; render(); } };
+    SY.refreshEvent(code)
+      .then(changed => { if (shown && changed && !touched) render(); }, () => { /* il server non risponde: vale quello che il PC sa */ })
+      .finally(show);
+    if (known) show();
+    else setTimeout(show, 3000);
+  }
+  boot();
 })();

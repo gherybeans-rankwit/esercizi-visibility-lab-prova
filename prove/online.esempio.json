@@ -1,0 +1,6 @@
+{
+  "api": "https://<id-del-progetto>.supabase.co",
+  "key": "sb_publishable_...",
+  "secret": "sb_secret_... (Project Settings > API Keys; resta solo su questo Mac, mai nel sito)",
+  "rete": { "url": "http://127.0.0.1:54399", "controllo": "http://127.0.0.1:54398" }
+}

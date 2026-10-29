@@ -6,12 +6,18 @@
 // Versione a schede: nessuna API. Il partecipante apre il motore in un'altra
 // scheda, senza account. Una riga di model_runs è un'apertura del motore,
 // model_responses è il testo che il partecipante incolla.
+//
+// Fase 2: il localStorage resta la copia sicura e sync.js manda le righe al
+// server (supabase/migrations). Nel pannello (admin.html) le tabelle stanno solo
+// in memoria e arrivano dal server.
 
 (function () {
   const D = window.LAB_DATA;
   const KEY = 'labportale.pagine.v1';
   const SESSION_KEY = 'labportale.pagine.sessione';
   const ADMIN_KEY = 'labportale.admin';
+  const CURRENT_KEY = 'labportale.evento.in.corso';
+  const ADMIN_MODE = document.body.dataset.page === 'admin';
   const TABLES = ['events', 'properties', 'participants', 'consent_records', 'exercises', 'questions', 'submissions', 'model_runs', 'model_responses', 'evaluations'];
 
   let db = null;
@@ -49,9 +55,11 @@
 
   // ---------- persistenza ----------
   function persist() {
+    if (ADMIN_MODE) return true;
     try { localStorage.setItem(KEY, JSON.stringify(db)); return true; } catch (e) { return false; }
   }
   function load() {
+    if (ADMIN_MODE) { db = emptyDb(); return; }
     try {
       const raw = localStorage.getItem(KEY);
       if (raw) {
@@ -63,9 +71,58 @@
     db = seed();
     persist();
   }
-  // Il Lab di oggi arriva da evento.js, uguale su tutti i PC: si crea o si
-  // aggiorna a ogni apertura, così un cambio di nome o di domanda arriva a tutti.
+  function emptyDb() {
+    const out = {};
+    TABLES.forEach(t => { out[t] = []; });
+    D.EXERCISES.forEach(e => out.exercises.push({ id: e.id, position: e.n, title: e.long }));
+    return out;
+  }
+  // I dati salvati più recenti: quelli del localStorage, che tutte le schede
+  // aggiornano subito, o quelli in memoria se il browser non salva.
+  function snapshot() {
+    if (!ADMIN_MODE) {
+      try {
+        const raw = localStorage.getItem(KEY);
+        if (raw) { const out = JSON.parse(raw); TABLES.forEach(t => { out[t] = out[t] || []; }); return out; }
+      } catch (e) { /* si usa la memoria */ }
+    }
+    return db;
+  }
+
+  // ---------- il Lab di oggi ----------
+  // Arriva dal server, dove lo crea il pannello RankWit: sync.js chiede l'evento
+  // in corso e lo salva qui. Se il server non ha mai risposto vale evento.js,
+  // uguale su tutti i PC.
+  let serverCurrent = null;
+  if (!ADMIN_MODE) {
+    try { serverCurrent = JSON.parse(localStorage.getItem(CURRENT_KEY) || 'null'); } catch (e) { serverCurrent = null; }
+  }
+  function setServerCurrent(id) {
+    serverCurrent = { id: id || null, at: nowIso() };
+    if (ADMIN_MODE) return;
+    try { localStorage.setItem(CURRENT_KEY, JSON.stringify(serverCurrent)); } catch (e) { /* solo in memoria */ }
+  }
+  const serverCurrentKnown = () => !!serverCurrent;
+  function applyServerEvent(data) {
+    if (!data || !data.event) return null;
+    const s = data.event;
+    const fields = { code: s.code, name: s.name, date: s.date, place: s.place || '', territory_label: s.territory_label || '', status: s.status, capacity: s.capacity, models: s.models && s.models.length ? s.models : Object.keys(D.MODELS), consent_version: s.consent_version, territory_question_id: s.territory_question_id, created_at: s.created_at, from_server: true };
+    let ev = byId('events', s.id);
+    if (ev) Object.assign(ev, fields);
+    else ev = insert('events', Object.assign({ id: s.id }, fields));
+    (data.questions || []).forEach(q => {
+      const cur = byId('questions', q.id);
+      if (cur) Object.assign(cur, q);
+      else insert('questions', q);
+    });
+    return ev;
+  }
+
+  // Il Lab di evento.js: si crea o si aggiorna a ogni apertura, così un cambio di
+  // nome o di domanda arriva a tutti. La domanda dell'esercizio 2 ha lo stesso id
+  // su tutti i PC (dal codice e dal testo), così sul server le risposte si sommano.
   function syncConfigEvent() {
+    if (ADMIN_MODE || (serverCurrent && serverCurrent.id && byId('events', serverCurrent.id))) return;
     const cfg = window.LAB_EVENTO;
     if (!cfg || !cfg.codice) return;
     const code = String(cfg.codice).trim().toLowerCase();
@@ -73,28 +130,52 @@
     if (!ev) {
       ev = insert('events', { id: 'E-' + code, code, name: cfg.nome || 'AI Visibility Lab', date: new Date().toISOString().slice(0, 10), place: '', territory_label: '', status: 'aperto', capacity: 50, models: Object.keys(D.MODELS), consent_version: D.CONSENT_VERSION, territory_question_id: null, created_at: nowIso() });
     }
+    if (ev.from_server) return;
     ev.name = cfg.nome || ev.name;
     ev.status = 'aperto';
     const text = (cfg.domanda_esercizio_2 || '').trim();
     const cur = territoryQuestion(ev);
     if (text && (!cur || cur.text !== text)) {
-      let q = find('questions', x => x.event_id === ev.id && x.exercise_id === 'territorio' && x.text === text);
-      if (!q) q = insert('questions', { id: uid('Q-'), event_id: ev.id, exercise_id: 'territorio', participant_id: null, key: null, text, source: 'evento', position: filter('questions', x => x.event_id === ev.id && x.exercise_id === 'territorio').length, created_at: nowIso() });
+      const qid = 'Q-' + code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20) + '-' + hash(text).toString(36).toUpperCase();
+      let q = byId('questions', qid);
+      if (!q) q = insert('questions', { id: qid, event_id: ev.id, exercise_id: 'territorio', participant_id: null, key: null, text, source: 'evento', position: filter('questions', x => x.event_id === ev.id && x.exercise_id === 'territorio').length, created_at: nowIso() });
       ev.territory_question_id = q.id;
     }
   }
-  const configEvent = () => (window.LAB_EVENTO ? byId('events', 'E-' + String(window.LAB_EVENTO.codice).trim().toLowerCase()) : null);
+  function configEvent() {
+    if (serverCurrent && serverCurrent.id && byId('events', serverCurrent.id)) return byId('events', serverCurrent.id);
+    if (ADMIN_MODE) return null;
+    return window.LAB_EVENTO ? byId('events', 'E-' + String(window.LAB_EVENTO.codice).trim().toLowerCase()) : null;
+  }
   function save() {
     const ok = persist();
     listeners.forEach(fn => fn({ type: 'saved', ok, at: new Date() }));
     return ok;
   }
   window.addEventListener('storage', e => {
+    if (ADMIN_MODE) return;
+    if (e.key === CURRENT_KEY) {
+      try { serverCurrent = JSON.parse(e.newValue || 'null'); } catch (err) { serverCurrent = null; }
+      return;
+    }
     if (e.key !== KEY) return;
     load();
     syncConfigEvent();
     listeners.forEach(fn => fn({ type: 'external' }));
   });
+
+  // ---------- pannello: righe che arrivano dal server ----------
+  function adminMerge(tables, deleted) {
+    Object.keys(tables || {}).forEach(t => {
+      if (!db[t]) return;
+      const index = new Map(db[t].map((r, i) => [r.id, i]));
+      tables[t].forEach(row => {
+        if (index.has(row.id)) db[t][index.get(row.id)] = row;
+        else { index.set(row.id, db[t].length); db[t].push(row); }
+      });
+    });
+    (deleted || []).forEach(d => { if (db[d.t]) db[d.t] = db[d.t].filter(r => r.id !== d.id); });
+  }
 
   // ---------- accesso alle tabelle ----------
   const all = t => db[t];
@@ -142,10 +223,10 @@
     const nameKey = (form.name.trim() + '|' + form.comune.trim()).toLowerCase();
     let prop = find('properties', p => p.event_id === ev.id && (p.name + '|' + p.comune).toLowerCase() === nameKey);
     if (!prop) {
-      prop = insert('properties', { id: uid('S-', 6), event_id: ev.id, name: form.name.trim(), comune: form.comune.trim(), type: form.type || '', created_at: created });
+      prop = insert('properties', { id: uid('S-'), event_id: ev.id, name: form.name.trim(), comune: form.comune.trim(), type: form.type || '', created_at: created });
     }
     const p = insert('participants', {
-      id: uid('P-', 5), event_id: ev.id, property_id: prop.id,
+      id: uid('P-'), event_id: ev.id, property_id: prop.id,
       created_at: created, last_seen_at: created,
       current_step: 'faq', progress: { faq: false, territorio: false, hotel: false, posizionamento: false }
     });
@@ -487,9 +568,10 @@
   persist();
 
   window.Store = {
-    TABLES, all, find, filter, byId, insert, update, save, reset, hash, fill, uid,
+    TABLES, all, find, filter, byId, insert, update, save, persist, reset, hash, fill, uid, snapshot,
     onChange: fn => { listeners.add(fn); return () => listeners.delete(fn); },
     eventByCode, configEvent, territoryQuestion, createEvent, createParticipant,
+    applyServerEvent, setServerCurrent, serverCurrentKnown, syncConfigEvent, adminMerge,
     getSub, setSub, getEval, setEval, faqQuestions, runOf, openRun, pasteRun, setUnavailable, responseFor,
     aliases, mentions, nameWithPlace, hotelPrompt, hotelQuestion, setHotelQuestion, positioningQuestion, selectedHotelQs, ensureHotelSetup,
     computeProgress, allOff, toCSV, session, admin

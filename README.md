@@ -1,91 +1,123 @@
-# Portale del Lab, versione da pubblicare
+# Portale del Lab, Fase 2: le risposte arrivano a RankWit
 
-Il sito che i partecipanti aprono sul loro PC durante l'AI Visibility Lab (29 ottobre 2026). Quattro esercizi, ognuno su una pagina a sé, nessun login. Vale per hotel e per destinazioni (DMO): sulla prima pagina scrivono il nome della struttura o della destinazione e il proprio comune (non la zona), poi fanno gli esercizi.
+Il sito che i partecipanti aprono sul loro PC durante l'AI Visibility Lab. Quattro esercizi, ognuno su una pagina a sé, nessun login. Vale per hotel e per destinazioni (DMO): sulla prima pagina scrivono il nome della struttura o della destinazione e il proprio comune (non la zona), poi fanno gli esercizi.
 
-Sono file statici: niente server, niente database, niente chiavi. Il pannello RankWit e i dati di esempio non ci sono: stanno nella versione di prova, `lab-portale (3)`.
+Rispetto alla Fase 1 (`lab-portale (4)`, online oggi) le pagine dei partecipanti sono le stesse. Cambia questo:
 
-## Online
+- le risposte arrivano a RankWit, su un database Supabase in UE;
+- «Invia» dice «Inviato» solo quando il server ha confermato;
+- chi conduce vede tutto nel pannello `admin.html`, con accesso protetto;
+- il Lab del giorno (nome e domanda dell'esercizio 2) si crea nel pannello: `evento.js` resta come riserva.
 
-**https://gherybeans-rankwit.github.io/esercizi-visibility-lab/**
+## Come funziona
 
-Repository pubblico `gherybeans-rankwit/esercizi-visibility-lab` (account personale gherybeans-rankwit), pubblicato con GitHub Pages dal ramo `main`.
+- **Le pagine** restano file statici (GitHub Pages). Il localStorage del PC resta la copia sicura: ogni modifica si salva lì, come prima.
+- **L'invio** lo fa `assets/sync.js`: 2 secondi dopo l'ultima modifica (al massimo ogni 6 secondi mentre si scrive) manda al server le righe nuove o cambiate. Se la rete cade riprova da solo dopo 2, 4, 8, 16 secondi, poi ogni 30, e subito quando la rete torna. Niente si perde: finché il server non conferma, le righe restano in coda sul PC, anche se si chiude la pagina.
+- **Il PC si riconosce** con un id e un segreto casuali, creati la prima volta. Può inserire e aggiornare solo le righe che ha creato lui. Dal browser nessuno legge i dati degli altri: le tabelle non sono raggiungibili, si passa solo da due funzioni del database (`lab_event` e `lab_sync`).
+- **Il pannello** legge con le funzioni `lab_admin_*`, solo per chi ha fatto l'accesso ed è scritto nella tabella `lab.staff`.
 
-Per aggiornarlo, per esempio dopo aver cambiato `evento.js`, dalla cartella `lab-portale (4)`:
+Tutto il database è in `supabase/migrations/20261029190000_lab_fase2.sql`.
 
-```bash
-gh auth switch -h github.com -u gherybeans-rankwit && git commit -am "Lab di <zona>" && git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push
+### Cosa vede il partecipante di nuovo
+
+Solo tre messaggi, quando serve:
+
+| Quando | Cosa compare |
+|---|---|
+| Dopo «Invia», in attesa del server | «Invio in corso…» |
+| Il server non risponde | «Non riesco a inviare: la rete non risponde. Riprovo da solo, lascia aperta la pagina.» Quando l'invio riesce: «Inviato.» |
+| La rete manca da un po' | in alto, «Salvato alle 10:42, in attesa di rete» |
+
+Senza `server.js` compilato le pagine funzionano come nella Fase 1.
+
+## Il pannello (`admin.html`)
+
+- **Eventi:** codice, nome, data, luogo, domanda dell'esercizio 2, motori, posti, stato (bozza, aperto, chiuso).
+- **L'evento in corso:** i link senza codice (`…/esercizio-2.html`) aprono l'evento aperto con la data di oggi o, se non c'è, il più recente. Un evento diverso si apre con `index.html?evento=codice`. Meglio tenere aperto un evento alla volta.
+- **Avanzamento** dal vivo, aggiornato ogni 10 secondi; **Risultati** per motore; **Export** CSV (punto e virgola, UTF-8 con BOM, apostrofo davanti alle celle che iniziano con `=` `+` `-` `@`, ora di apertura e di incolla).
+- **Ruoli:** «team» vede tutto, anche i nomi (servono in sala), e scarica i file anonimi: nomi delle strutture e comuni diventano [struttura] e [comune]. «dati» scarica anche i file con i dati identificabili e cancella i dati di una struttura su richiesta (Avanzamento, «Mostra struttura e comune», «Cancella»). Chi vede i nomi a schermo li può copiare: il blocco vale per i file.
+
+### Dare l'accesso a una persona del team
+
+Due passi, nella dashboard di Supabase:
+
+1. **Authentication → Users → Invite user**, con la sua email. Riceve un link: apre il pannello e sceglie la password.
+2. **SQL Editor**, una riga:
+
+```sql
+insert into lab.staff (email, role) values ('nome@rankwit.ai', 'team');  -- oppure 'dati'
 ```
 
-Il sito si aggiorna da solo in uno o due minuti.
+Per togliere l'accesso: `delete from lab.staff where email = 'nome@rankwit.ai';` (e, se si vuole, cancellare l'utente in Authentication).
+
+## Privacy
+
+- Si raccolgono solo nome della struttura o della destinazione e comune, più quello che il partecipante scrive o incolla. I testi incollati possono contenere nomi.
+- **Conservazione:** 12 mesi dalla data del Lab, poi il database cancella tutto da solo (ogni notte alle 3:15, `lab.purge`).
+- **Cancellazione su richiesta:** dal pannello, ruolo «dati». Se il PC di quel partecipante manda ancora qualcosa, il server lo rifiuta.
+- L'informativa si firma su carta all'ingresso: nel portale nessuna casella.
+
+## Mettere online il server (una volta)
+
+1. Su supabase.com, con un account RankWit del team (non personale), crea un progetto nella regione **Central EU (Frankfurt)**. Piano gratuito.
+2. **SQL Editor:** incolla e lancia tutto `supabase/migrations/20261029190000_lab_fase2.sql`.
+3. **Authentication → Sign In / Providers:** Email attivo, «Allow new users to sign up» spento.
+4. **Authentication → URL Configuration:** Site URL e Redirect URLs con l'indirizzo di `admin.html` (per esempio `https://gherybeans-rankwit.github.io/esercizi-visibility-lab/admin.html`).
+5. **Project Settings → API Keys:** copia l'URL del progetto e la chiave «publishable» (o «anon») in `server.js`. È pubblica per costruzione: i dati li proteggono le regole del database. La chiave «secret» o «service_role» non va mai nel sito.
+6. Invita il team (sopra).
+
+**Piano gratuito:** se nessuno usa il progetto per una settimana, Supabase lo mette in pausa. Prima di ogni Lab apri la dashboard: se è in pausa, «Restore project» e aspetta qualche minuto. Il piano gratuito non ha backup automatici: dopo il Lab scarica gli export.
 
 ## Prima di ogni Lab
 
-Aprire `evento.js` e cambiare due righe:
+1. Controlla che il progetto Supabase sia attivo (sopra).
+2. Nel pannello crea l'evento, con la domanda dell'esercizio 2, e mettilo su «aperto». Chiudi quello vecchio.
+3. Apri `index.html` da un PC e controlla che compaia il nome giusto.
 
-```js
-nome: 'AI Visibility Lab',
-domanda_esercizio_2: 'Cosa vedere a {comune} e dintorni in un weekend, e dove dormire?'
-```
+`evento.js` serve solo se il server non risponde: tienilo con il nome generico del Lab. Se un PC parte con `evento.js`, le sue risposte arrivano lo stesso: il pannello mostra quell'evento con la nota «Creato da un PC con evento.js».
 
-- `nome` compare in alto in ogni pagina (per esempio «AI Visibility Lab · Siena»).
-- `domanda_esercizio_2` è la domanda da copiare nei tre motori. `{comune}` diventa il comune che ogni partecipante ha scritto all'inizio. Per una domanda uguale per tutti, scrivere il territorio al posto di `{comune}`.
+## Online
 
-Se si cambia `evento.js` a Lab iniziato, il cambio arriva anche a chi ha già aperto il sito, alla pagina successiva che apre.
-
-## Pubblicare
-
-Caricare tutta la cartella così com'è (`index.html`, `esercizio-1.html` … `esercizio-4.html`, `evento.js`, `assets/`) su un hosting statico in HTTPS. Vanno bene, per esempio:
-
-- Netlify Drop: trascinare la cartella su app.netlify.com/drop;
-- Cloudflare Pages o GitHub Pages;
-- una sottocartella del server di lab.rankwit.ai.
-
-Funziona anche in una sottocartella (`lab.rankwit.ai/portale/`), perché tutti i percorsi sono relativi.
-
-## I link da mostrare in sala
-
-| Cosa | Indirizzo |
-|---|---|
-| Ingresso ed elenco degli esercizi | `<indirizzo>/` |
-| Esercizio 1, FAQ con ChatGPT | `<indirizzo>/esercizio-1.html` |
-| Esercizio 2, territorio | `<indirizzo>/esercizio-2.html` |
-| Esercizio 3, struttura | `<indirizzo>/esercizio-3.html` |
-| Esercizio 4, posizionamento | `<indirizzo>/esercizio-4.html` |
-
-Ogni pagina si apre sempre e nessuna porta alla successiva: il ritmo lo dà chi conduce, mostrando il link dell'esercizio quando è il momento.
-
-## Cosa fa il partecipante
-
-1. Apre il link, scrive il nome della struttura o della destinazione e il proprio comune (non la zona) (una volta sola, poi restano fissi su quel PC).
-2. **Esercizio 1:** scrive le domande che gli fanno ospiti e visitatori (le caselle partono vuote; ne bastano anche due) e le sue risposte, copia il testo pronto, lo incolla in ChatGPT, incolla qui la risposta di ChatGPT e scarica il documento FAQ (pagina HTML da mettere sul sito o mandare a chi lo gestisce).
-3. **Esercizi 2 e 4:** copia la domanda in cima, la incolla in ChatGPT, Modalità AI di Google e Gemini, incolla la risposta di ogni motore nella sua casella e la valuta.
-4. **Esercizio 3:** sempre aperto, non dipende dall'esercizio 1. In cima ci sono tre domande, vuote, con sotto la risposta del partecipante; le caselle vuote si riempiono con le domande che ha già scritto nell'esercizio 1. Si cambiano quando si vuole. Le scrive lui nei tre motori, incolla la risposta di ogni motore nella sua casella e la valuta.
-5. **Esercizi 2, 3 e 4 si chiudono con «Invia».** Il pulsante controlla che per ogni motore ci siano la risposta incollata e la valutazione (un motore segnato «Non si apre» si salta) e, se manca qualcosa, lo elenca. Poi dice «Inviato. Aspetta le indicazioni in sala». Per ora «Invia» chiude l'esercizio sul PC: l'invio delle risposte a RankWit arriva con la Fase 2.
-
-I motori si aprono in un'altra scheda, senza account. Ogni esercizio con i motori lo dice: non serve accedere né registrarsi, e per tornare al portale basta cliccare la sua scheda.
-
-## Cosa sapere
-
-- **Le risposte restano sul PC di ciascuno.** RankWit non raccoglie niente: per raccogliere le risposte serve un server (Fase 2).
-- **Finestra in incognito:** il browser non salva; la pagina lo dice e invita a scaricare il documento alla fine.
-- **I motori non si possono mostrare dentro il portale.** ChatGPT e Google lo vietano con `X-Frame-Options: SAMEORIGIN`, Gemini con `DENY`: per questo si aprono in un'altra scheda.
-
-## Da provare prima del Lab
-
-- Cinque o dieci portatili sul Wi-Fi della sala: ChatGPT e Google senza account potrebbero limitare le richieste o chiedere una verifica anti-robot.
-- I banner dei cookie di ChatGPT e Google al primo accesso: un clic in più, da dire in sala.
+Il sito dei partecipanti di oggi è la Fase 1: **https://gherybeans-rankwit.github.io/esercizi-visibility-lab/** (repository `gherybeans-rankwit/esercizi-visibility-lab`, cartella `lab-portale (4)`). Questa cartella ha un suo git, senza collegamento al sito: si pubblica solo dopo le prove.
 
 ## Provare in locale
 
+Serve Docker (qui colima) e la CLI di Supabase.
+
 ```bash
-python3 -m http.server 8773 --directory "lab-portale (4)"
+colima start
 ```
 
-Poi `http://localhost:8773`. In Claude Code c'è la voce `lab-portale-4` in `.claude/launch.json`.
+```bash
+cd "lab-portale (5)" && supabase start -x studio,postgres-meta,supavisor,imgproxy,vector,logflare,realtime,storage-api,edge-runtime
+```
+
+```bash
+cd "lab-portale (5)" && node prove/utenti-locali.mjs
+```
+
+```bash
+cd "lab-portale (5)" && node prove/rete.mjs
+```
+
+Poi `python3 -m http.server 8774 --directory "lab-portale (5)"` (voce `lab-portale-5` in `.claude/launch.json`) e `http://localhost:8774`. `server.js` punta alla rete finta (`prove/rete.mjs`, porta 54399), che si può staccare: `curl 127.0.0.1:54398/giu`, `/muta`, `/persa`, `/caso?p=0.3`, `/su`. Gli utenti di prova del pannello e le loro password sono in `prove/.locale.json`, fuori dal repository.
+
+### Prova di carico
+
+```bash
+cd "lab-portale (5)" && node prove/carico.mjs 60 4 locale
+```
+
+60 PC finti fanno i quattro esercizi in 4 minuti con il codice vero delle pagine, mentre la rete cade a caso, si stacca, resta muta e perde le risposte. Alla fine confronta riga per riga quello che ogni PC ha salvato con quello che c'è sul server. Il riepilogo va in `prove/risultati/`.
 
 ## File
 
-- `evento.js`: il Lab del giorno (da cambiare prima di ogni Lab)
-- `index.html`, `esercizio-1.html` … `esercizio-4.html`: le pagine
-- `assets/app.js`, `assets/store.js`, `assets/data.js`: il funzionamento (`app.js` contiene anche il codice del pannello, che qui non si usa)
+- `evento.js`: il Lab di riserva, se il server non risponde
+- `server.js`: indirizzo e chiave pubblica del server
+- `index.html`, `esercizio-1.html` … `esercizio-4.html`: le pagine dei partecipanti
+- `admin.html`: il pannello RankWit
+- `assets/app.js`, `assets/store.js`, `assets/data.js`: il funzionamento; `assets/sync.js`: l'invio al server
+- `assets/vendor/supabase-2.117.3.js`: libreria per l'accesso al pannello (MIT)
 - `assets/app.css`, `assets/marks.js`, `assets/brand/`, `assets/fonts/`: stile, marchi dei motori, logo, font
+- `supabase/`: database (schema, regole, funzioni, conservazione) e configurazione per la prova in locale
+- `prove/`: rete finta, utenti di prova, prova di carico

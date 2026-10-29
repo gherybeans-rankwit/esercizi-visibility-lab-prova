@@ -1,1 +1,6 @@
 .DS_Store
+prove/.locale.json
+prove/.online.json
+prove/risultati/
+supabase/.temp/
+supabase/.branches/
