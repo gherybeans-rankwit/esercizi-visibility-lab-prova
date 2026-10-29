@@ -57,9 +57,13 @@ Per togliere l'accesso: `delete from lab.staff where email = 'nome@rankwit.ai';`
 - **Cancellazione su richiesta:** dal pannello, ruolo «dati». Se il PC di quel partecipante manda ancora qualcosa, il server lo rifiuta.
 - L'informativa si firma su carta all'ingresso: nel portale nessuna casella.
 
-## Mettere online il server (una volta)
+## Il server online
 
-1. Su supabase.com, con un account RankWit del team (non personale), crea un progetto nella regione **Central EU (Frankfurt)**. Piano gratuito.
+Il progetto Supabase è «AI Visibility Labs» (`fvmehezybvpehkxnzphc`), in UE, piano gratuito. Lo schema è caricato e `server.js` ha già indirizzo e chiave pubblica. Da `localhost` le pagine usano invece la prova in locale.
+
+Per rifarlo da zero:
+
+1. Su supabase.com, con un account RankWit del team (non personale), crea un progetto in una regione UE. Piano gratuito.
 2. **SQL Editor:** incolla e lancia tutto `supabase/migrations/20261029190000_lab_fase2.sql`.
 3. **Authentication → Sign In / Providers:** Email attivo, «Allow new users to sign up» spento.
 4. **Authentication → URL Configuration:** Site URL e Redirect URLs con l'indirizzo di `admin.html` (per esempio `https://gherybeans-rankwit.github.io/esercizi-visibility-lab/admin.html`).
@@ -79,6 +83,8 @@ Per togliere l'accesso: `delete from lab.staff where email = 'nome@rankwit.ai';`
 ## Online
 
 Il sito dei partecipanti di oggi è la Fase 1: **https://gherybeans-rankwit.github.io/esercizi-visibility-lab/** (repository `gherybeans-rankwit/esercizi-visibility-lab`, cartella `lab-portale (4)`). Questa cartella ha un suo git, senza collegamento al sito: si pubblica solo dopo le prove.
+
+La Fase 2 di prova è su **https://gherybeans-rankwit.github.io/esercizi-visibility-lab-prova/** (repository `gherybeans-rankwit/esercizi-visibility-lab-prova`). Usa lo stesso server online: non va data ai partecipanti.
 
 ## Provare in locale
 
@@ -109,6 +115,18 @@ cd "lab-portale (5)" && node prove/carico.mjs 60 4 locale
 ```
 
 60 PC finti fanno i quattro esercizi in 4 minuti con il codice vero delle pagine, mentre la rete cade a caso, si stacca, resta muta e perde le risposte. Alla fine confronta riga per riga quello che ogni PC ha salvato con quello che c'è sul server. Il riepilogo va in `prove/risultati/`.
+
+Contro il server online serve un evento aperto e una rete finta davanti al progetto:
+
+```bash
+cd "lab-portale (5)" && node prove/rete.mjs https://fvmehezybvpehkxnzphc.supabase.co 54499 54498
+```
+
+```bash
+cd "lab-portale (5)" && node prove/carico.mjs 60 4 online
+```
+
+Legge `prove/.online.json` (sullo stampo di `prove/online.esempio.json`), che resta su questo Mac.
 
 ## File
 
