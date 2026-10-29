@@ -13,7 +13,7 @@
   const STATE_KEY = 'labportale.invio';
   const DEBOUNCE = 2000;
   const MAX_WAIT = 6000;
-  const TIMEOUT = 12000;
+  const TIMEOUT = 10000;
   const MAX_ROWS = 250;
   const MAX_BYTES = 300000;
   // Il server cancella solo queste righe (per esempio una risposta incollata e poi svuotata).
@@ -154,6 +154,10 @@
       });
       if (!rows.length && !dels.length) { saveState(st); return; }
       st.rev = Math.max((st.rev || 0) + 1, Date.now());
+      // Una riga mandata può arrivare al server anche se la conferma si perde: si
+      // segna subito (impronta vuota = non confermata), così se poi si cancella sul
+      // PC si cancella anche sul server.
+      rows.forEach(x => { const k = x.t + '|' + x.id; if (!st.acked[k]) st.acked[k] = ['', x.pid]; });
       saveState(st);
       const res = await rpc('lab_sync', {
         p_device: st.device.id, p_secret: st.device.secret, p_rev: st.rev,
@@ -216,8 +220,8 @@
       backoff = 0;
       setStatus({ sending: false, failing: false, lastOk: new Date(), error: null });
     }, err => {
-      // Nuovo tentativo dopo 2, 4, 8, 16, poi ogni 30 secondi.
-      backoff = Math.min(30000, backoff ? backoff * 2 : 2000);
+      // Nuovo tentativo dopo 2, 4, 8, poi ogni 15 secondi.
+      backoff = Math.min(15000, backoff ? backoff * 2 : 2000);
       retryTimer = setTimeout(() => flush().catch(() => {}), backoff + Math.random() * 1000);
       setStatus({ sending: false, failing: true, error: String((err && err.message) || err) });
       throw err;

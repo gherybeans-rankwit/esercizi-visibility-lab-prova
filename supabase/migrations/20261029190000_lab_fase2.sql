@@ -369,7 +369,14 @@ begin
         when 'model_responses' then
           select m.participant_id, m.event_id into v_run from lab.model_runs m where m.id = v_row->>'run_id' and m.device_id = p_device;
           if v_run.participant_id is null or not lab.owns(p_device, v_run.participant_id) then raise exception 'apertura di un altro PC'; end if;
-          perform lab.put_row('model_responses', v_row || jsonb_build_object('participant_id', v_run.participant_id, 'event_id', v_run.event_id), p_device);
+          -- Una sola risposta incollata per apertura: la più recente sostituisce le altre.
+          -- Se ne esiste già una più recente, questa è vecchia (arrivata in ritardo) e si ignora.
+          if not exists (select 1 from lab.model_responses x where x.run_id = v_row->>'run_id' and x.id <> v_id and x.rev > p_rev) then
+            perform lab.put_row('model_responses', v_row || jsonb_build_object('participant_id', v_run.participant_id, 'event_id', v_run.event_id), p_device);
+            with d as (delete from lab.model_responses x where x.run_id = v_row->>'run_id' and x.id <> v_id and x.device_id = p_device returning x.id, x.event_id)
+            insert into lab.tombstones (tbl, id, event_id) select 'model_responses', d.id, d.event_id from d
+            on conflict (tbl, id) do update set deleted_at = clock_timestamp();
+          end if;
         when 'consent_records', 'model_runs', 'submissions', 'evaluations' then
           if not lab.owns(p_device, v_row->>'participant_id') then raise exception 'partecipante di un altro PC'; end if;
           perform lab.put_row(v_t, v_row, p_device);

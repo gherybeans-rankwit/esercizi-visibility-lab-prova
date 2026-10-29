@@ -842,7 +842,11 @@
       if (!session) return viewLogin();
       if (parts[0] === 'password' || A.setPassword) return viewSetPassword();
       if (!A.me) {
-        try { A.me = await call('lab_admin_me'); } catch (e) { return shellError(e); }
+        try { A.me = await call('lab_admin_me'); } catch (e) {
+          // Accesso scaduto o non più valido: si rientra.
+          if (/jwt|token/i.test(e.message)) { await A.client.auth.signOut(); return viewLogin(); }
+          return shellError(e);
+        }
         if (token !== A.token) return;
       }
       if (!A.me) return viewNoAccess(session.user && session.user.email);

@@ -12,7 +12,7 @@ Rispetto alla Fase 1 (`lab-portale (4)`, online oggi) le pagine dei partecipanti
 ## Come funziona
 
 - **Le pagine** restano file statici (GitHub Pages). Il localStorage del PC resta la copia sicura: ogni modifica si salva lì, come prima.
-- **L'invio** lo fa `assets/sync.js`: 2 secondi dopo l'ultima modifica (al massimo ogni 6 secondi mentre si scrive) manda al server le righe nuove o cambiate. Se la rete cade riprova da solo dopo 2, 4, 8, 16 secondi, poi ogni 30, e subito quando la rete torna. Niente si perde: finché il server non conferma, le righe restano in coda sul PC, anche se si chiude la pagina.
+- **L'invio** lo fa `assets/sync.js`: 2 secondi dopo l'ultima modifica (al massimo ogni 6 secondi mentre si scrive) manda al server le righe nuove o cambiate. Se la rete cade riprova da solo dopo 2, 4, 8 secondi, poi ogni 15, e subito quando il PC si ricollega. Se il server non risponde entro 10 secondi, la pagina lo dice. Niente si perde: finché il server non conferma, le righe restano in coda sul PC, anche se si chiude la pagina.
 - **Il PC si riconosce** con un id e un segreto casuali, creati la prima volta. Può inserire e aggiornare solo le righe che ha creato lui. Dal browser nessuno legge i dati degli altri: le tabelle non sono raggiungibili, si passa solo da due funzioni del database (`lab_event` e `lab_sync`).
 - **Il pannello** legge con le funzioni `lab_admin_*`, solo per chi ha fatto l'accesso ed è scritto nella tabella `lab.staff`.
 
