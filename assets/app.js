@@ -869,28 +869,30 @@
     shellA(`<div class="card narrow" style="margin:40px auto"><h1>Qualcosa non va</h1><p class="muted" style="margin-top:10px">${esc(errText(e))}</p><p style="margin-top:16px"><button class="btn ghost" type="button" id="retry">Riprova</button></p></div>`);
     $('#retry').addEventListener('click', render);
   }
-  function viewNoAccess(mail) {
+  // Accesso, password e accesso negato: una scheda stretta come quella del nome
+  // nelle pagine dei partecipanti (fuori da .home, che ha lo stile del vecchio codice).
+  function authCard(inner) {
     app.innerHTML = `
       <header class="bar"><div class="bar-in">${brand('index.html')}</div></header>
-      <main class="home"><div class="card stack">
-        <span class="label">Area RankWit</span><h1>Accesso non abilitato</h1>
-        <p class="muted">L’indirizzo ${esc(mail || '')} non ha accesso al pannello. Chiedi a chi gestisce il Lab.</p>
-        <p><a class="btn ghost" href="#/admin/esci">Esci</a></p>
-      </div></main>`;
+      <main id="main" class="wrap"><div class="card" style="max-width:460px;margin:24px auto 0">${inner}</div></main>`;
+  }
+  function viewNoAccess(mail) {
+    authCard(`
+      <span class="label">Area RankWit</span><h1>Accesso non abilitato</h1>
+      <p class="muted" style="margin-top:8px">L’indirizzo ${esc(mail || '')} non ha accesso al pannello. Chiedi a chi gestisce il Lab.</p>
+      <p style="margin-top:20px"><a class="btn ghost" href="#/admin/esci">Esci</a></p>`);
   }
 
   function viewLogin() {
-    app.innerHTML = `
-      <header class="bar"><div class="bar-in">${brand('index.html')}</div></header>
-      <main class="home"><form class="card stack" id="login" novalidate>
-        <span class="label">Area RankWit</span><h1>Accedi</h1>
+    authCard(`
+      <span class="label">Area RankWit</span><h1>Accedi</h1>
+      <p class="muted" style="margin-top:8px">Solo per il team RankWit. Per avere l’accesso chiedi a chi gestisce il Lab.</p>
+      <form id="login" class="stack" novalidate style="margin-top:20px">
         <label class="field"><span>Email</span><input type="email" id="l-mail" autocomplete="username" placeholder="nome@rankwit.ai"></label>
         <label class="field"><span>Password</span><input type="password" id="l-pass" autocomplete="current-password"></label>
         <p class="err" id="l-err" role="alert" hidden></p>
-        <button class="btn primary" type="submit">Entra</button>
-        <p class="small"><button class="linkbtn" type="button" id="l-forgot">Password dimenticata?</button></p>
-        <p class="note small">Solo per il team RankWit. Per avere l’accesso chiedi a chi gestisce il Lab.</p>
-      </form></main>`;
+        <div class="row"><button class="btn primary" type="submit">Entra</button><button class="linkbtn" type="button" id="l-forgot" style="margin-left:auto">Password dimenticata?</button></div>
+      </form>`);
     const err = msg => { $('#l-err').hidden = !msg; $('#l-err').textContent = msg || ''; };
     $('#login').addEventListener('submit', async e => {
       e.preventDefault();
@@ -913,15 +915,15 @@
   }
 
   function viewSetPassword() {
-    app.innerHTML = `
-      <header class="bar"><div class="bar-in">${brand('index.html')}</div></header>
-      <main class="home"><form class="card stack" id="pw" novalidate>
-        <span class="label">Area RankWit</span><h1>Scegli la password</h1>
+    authCard(`
+      <span class="label">Area RankWit</span><h1>Scegli la password</h1>
+      <p class="muted" style="margin-top:8px">La usi per entrare nel pannello con la tua email.</p>
+      <form id="pw" class="stack" novalidate style="margin-top:20px">
         <label class="field"><span>Nuova password</span><input type="password" id="p-1" autocomplete="new-password"><small>Almeno 10 caratteri.</small></label>
         <label class="field"><span>Ripeti la password</span><input type="password" id="p-2" autocomplete="new-password"></label>
         <p class="err" id="p-err" role="alert" hidden></p>
-        <button class="btn primary" type="submit">Salva la password</button>
-      </form></main>`;
+        <div><button class="btn primary" type="submit">Salva la password</button></div>
+      </form>`);
     $('#p-1').focus();
     $('#pw').addEventListener('submit', async e => {
       e.preventDefault();
